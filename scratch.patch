@@ -1,0 +1,28 @@
+--- src/widgets/clip.rs
++++ src/widgets/clip.rs
+@@ -10,6 +10,7 @@
+ };
+ 
+ use crate::clip_components::ClipComponent;
++use std::sync::Arc;
+ 
+ pub const MIN_LENGTH: f32 = 48.0;
+ pub const HEIGHT: f32 = 52.0;
+@@ -34,13 +35,15 @@
+ #[derive(Debug, Clone)]
+ pub struct Clip {
+     pub name: String,
+     /// Clip duration, measured in timeline pixels for this small example widget.
+     pub length: f32,
++    pub component: Arc<dyn ClipComponent>,
+ }
+ 
+ impl Clip {
+-    pub fn new(name: impl Into<String>, length: f32) -> Self {
++    pub fn new(name: impl Into<String>, length: f32, component: Arc<dyn ClipComponent>) -> Self {
+         Self {
+             name: name.into(),
+             length: length.max(MIN_LENGTH),
++            component,
+         }
+     }
