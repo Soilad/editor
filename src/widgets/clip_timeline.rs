@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use iced::{
     Border, Color, Element, Event, Length, Point, Rectangle, Shadow, Size, Theme,
     advanced::{
@@ -9,7 +11,7 @@ use iced::{
     alignment,
 };
 
-use crate::clip_components::{ClipComponent, video_clip::VideoComponent};
+use crate::clip_components::{ ClipComponent, video_clip::VideoComponent };
 
 pub const MIN_LENGTH: f32 = 48.0;
 pub const HEIGHT: f32 = 52.0;
@@ -33,23 +35,23 @@ pub struct Appearance {
 /// [`Timeline`](super::timeline::Timeline), while clip sizing, hit-testing, and
 /// rendering live here.
 #[derive(Clone)]
-pub struct ClipTimeline<'a> {
+pub struct ClipTimeline {
     pub name: String,
     /// Clip duration, measured in timeline pixels for this small example widget.
     pub length: f32,
-    pub component: &'a dyn ClipComponent
+    pub component: Rc<dyn ClipComponent>,
 }
 
-impl<'a> ClipTimeline<'a> {
+impl ClipTimeline {
     pub fn new(
         name: impl Into<String>,
         length: f32,
-        component: &'a dyn ClipComponent
+        component: Rc<dyn ClipComponent>,
     ) -> Self {
         Self {
             name: name.into(),
             length: length.max(MIN_LENGTH),
-            component: component
+            component,
         }
     }
 
@@ -106,17 +108,12 @@ impl<'a> ClipTimeline<'a> {
         renderer: &mut Renderer,
         theme: &Theme,
         bounds: Rectangle,
-        appearance: Appearance,
         viewport: &Rectangle,
     ) where
         Renderer: iced::advanced::Renderer + text::Renderer,
     {
         let palette = theme.palette();
-        let fill = if appearance.active {
-            palette.primary
-        } else {
-            palette.background
-        };
+        let fill = palette.background;
 
         renderer.fill_quad(
             Quad {
@@ -171,17 +168,17 @@ impl<'a> ClipTimeline<'a> {
     }
 }
 
-impl<'a> Default for ClipTimeline<'a> {
+impl Default for ClipTimeline {
     fn default() -> Self {
         Self::new(
             "Untitled clip",
             180.0,
-            &VideoComponent {}
+            Rc::new(VideoComponent::default()),
         )
     }
 }
 
-impl<Message, Renderer> Widget<Message, Theme, Renderer> for ClipTimeline<'_>
+impl<Message, Renderer> Widget<Message, Theme, Renderer> for ClipTimeline
 where
     Renderer: iced::advanced::Renderer + text::Renderer,
 {
@@ -217,7 +214,6 @@ where
             renderer,
             theme,
             layout.bounds(),
-            Appearance { active: false },
             viewport,
         );
     }
@@ -247,11 +243,12 @@ where
     }
 }
 
-impl<'a, Message: 'a, Renderer> From<ClipTimeline<'a>> for Element<'a, Message, Theme, Renderer>
+impl<'a, Message: 'a, Renderer> From<ClipTimeline> for Element<'a, Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer + text::Renderer + 'a,
 {
-    fn from(widget: ClipTimeline<'a>) -> Self {
+    fn from(widget: ClipTimeline) -> Self {
         Self::new(widget)
     }
 }
+

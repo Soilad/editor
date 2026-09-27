@@ -9,7 +9,7 @@ use iced::{
     alignment, keyboard,
 };
 
-use crate::widgets::clip_timeline::{self, Appearance, ClipTimeline, Hit};
+use crate::widgets::clip_timeline::{self, ClipTimeline, Hit};
 
 const LABEL_WIDTH: f32 = 132.0;
 const TRACK_HEIGHT: f32 = 68.0;
@@ -31,6 +31,9 @@ struct Placement {
 #[derive(Debug, Default)]
 struct State {
     placements: Vec<Placement>,
+    /// Set when a clip is dropped onto the timeline; consumed by the next `diff()` call
+    /// to position the newly-added clip at the cursor location.
+    pending_placement: Option<(f32, usize)>, // (start_x in timeline coords, track index)
     drag: Option<Drag>,
     playhead: f32,
     scroll_x: f32,
@@ -54,17 +57,17 @@ enum DragMode {
 
 /// A compact editor-style timeline with track labels, movable clips, resize handles,
 /// a draggable playhead, horizontal scrolling, and cursor-centered zooming.
-pub struct Timeline<'a, Message, Renderer> {
-    clips: Vec<ClipTimeline<'a>>,
+pub struct Timeline<Message, Renderer> {
+    clips: Vec<ClipTimeline>,
     track_labels: Vec<String>,
-    on_drop: Option<Box<dyn Fn() -> Message>>,
+    on_drop: Option<Box<dyn Fn(Point) -> Message>>,
     is_dragging_clip: bool,
     length: i32,
     _phantom: std::marker::PhantomData<(Message, Renderer)>,
 }
 
-impl<'a, Message, Renderer> Timeline<'a, Message, Renderer> {
-    pub fn with_clips(clips: Vec<ClipTimeline<'a>>) -> Self {
+impl<Message, Renderer> Timeline<Message, Renderer> {
+    pub fn with_clips(clips: Vec<ClipTimeline>) -> Self {
         let track_labels = (1..=clips.len())
             .map(|index| format!("Video {index}"))
             .collect();
@@ -78,11 +81,8 @@ impl<'a, Message, Renderer> Timeline<'a, Message, Renderer> {
         }
     }
 
-    pub fn on_drop(mut self, message: Message) -> Self
-    where
-        Message: Clone + 'static,
-    {
-        self.on_drop = Some(Box::new(move || message.clone()));
+    pub fn on_drop(mut self, f: impl Fn(Point) -> Message + 'static) -> Self {
+        self.on_drop = Some(Box::new(f));
         self
     }
 
@@ -98,6 +98,7 @@ impl<'a, Message, Renderer> Timeline<'a, Message, Renderer> {
     fn lane_width(&self) -> f32 {
         TIMELINE_WIDTH - LABEL_WIDTH
     }
+
 
     fn content_width(&self, state: &State) -> f32 {
         state
@@ -177,7 +178,7 @@ impl<'a, Message, Renderer> Timeline<'a, Message, Renderer> {
     }
 }
 
-impl<'a, Message, Renderer> Default for Timeline<'a, Message, Renderer>
+impl<Message, Renderer> Default for Timeline<Message, Renderer>
 where
     Renderer: iced::advanced::Renderer,
 {
@@ -186,7 +187,7 @@ where
     }
 }
 
-impl<'a, Message, Renderer> Widget<Message, Theme, Renderer> for Timeline<'a, Message, Renderer>
+impl<Message, Renderer> Widget<Message, Theme, Renderer> for Timeline<Message, Renderer>
 where
     Renderer: iced::advanced::Renderer + text::Renderer,
 {
@@ -209,13 +210,28 @@ where
     fn diff(&self, tree: &mut Tree) {
         let state = tree.state.downcast_mut::<State>();
         if state.placements.len() < self.clips.len() {
+            let pending = state.pending_placement.take();
             state
                 .placements
                 .extend(
-                    (state.placements.len()..self.clips.len()).map(|index| Placement {
-                        track: index.min(self.track_count() - 1),
-                        start: 24.0 + index as f32 * 84.0,
-                        length: self.clips[index].length.max(clip_timeline::MIN_LENGTH),
+                    (state.placements.len()..self.clips.len()).map(|index| {
+                        let (start, track) = if index == self.clips.len() - 1 {
+                            // Last (newly added) clip — use the drop position if available.
+                            pending.unwrap_or_else(|| (
+                                24.0 + index as f32 * 84.0,
+                                index.min(self.track_count() - 1),
+                            ))
+                        } else {
+                            (
+                                24.0 + index as f32 * 84.0,
+                                index.min(self.track_count() - 1),
+                            )
+                        };
+                        Placement {
+                            track,
+                            start,
+                            length: self.clips[index].length.max(clip_timeline::MIN_LENGTH),
+                        }
                     }),
                 );
         } else {
@@ -301,7 +317,7 @@ where
             );
         }
 
-        for (index, (clip_timeline, placement)) in self.clips.iter().zip(&state.placements).enumerate() {
+        for (clip_timeline, placement) in self.clips.iter().zip(&state.placements) {
             let clip_bounds = self.clip_bounds(layout, state, placement);
             if clip_bounds.x > lane_bounds.x + lane_bounds.width
                 || clip_bounds.x + clip_bounds.width < lane_bounds.x
@@ -309,20 +325,10 @@ where
                 continue;
             }
 
-            let active = state.drag.as_ref().is_some_and(|drag| {
-                matches!(
-                    drag.mode,
-                    DragMode::Move { clip, .. }
-                        | DragMode::ResizeStart { clip, .. }
-                        | DragMode::ResizeEnd { clip }
-                        if clip == index
-                )
-            });
             clip_timeline.draw_at(
                 renderer,
                 theme,
                 clip_bounds,
-                Appearance { active },
                 viewport,
             );
         }
@@ -499,7 +505,6 @@ where
                     Self::snap(self.screen_to_timeline_x(layout, state, position.x))
                         .clamp(0.0, self.content_width(state));
                     shell.request_redraw();
-                    dbg!(&state.drag);
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -509,8 +514,6 @@ where
                 let Some(drag) = state.drag.take() else {
                     return;
                 };
-
-                dbg!(&drag.mode);
 
                 match drag.mode {
                     DragMode::Move { clip, grab_x } => {
@@ -584,8 +587,17 @@ where
                                 .lane_bounds(layout)
                                 .contains(Point::new(position.x, layout.bounds().y))
                         {
+                            // Compute where on the timeline the clip landed.
+                            let raw_start = self.screen_to_timeline_x(layout, state, position.x);
+                            let start = Self::snap(raw_start).max(0.0);
+                            let track = (((position.y - layout.bounds().y) / TRACK_HEIGHT)
+                                .floor() as isize)
+                                .clamp(0, self.track_count() as isize - 1)
+                                as usize;
+                            state.pending_placement = Some((start, track));
+
                             if let Some(on_drop) = &self.on_drop {
-                                shell.publish(on_drop());
+                                shell.publish(on_drop(position));
                             }
                         }
                     }
@@ -657,7 +669,10 @@ where
 
         for index in (0..self.clips.len()).rev() {
             let clip_bounds = self.clip_bounds(layout, state, &state.placements[index]);
-            let interaction = ClipTimeline::mouse_interaction_at(clip_bounds, cursor);
+            let interaction = ClipTimeline::mouse_interaction_at(
+                clip_bounds,
+                cursor,
+            );
             if interaction != mouse::Interaction::None {
                 return interaction;
             }
@@ -667,12 +682,13 @@ where
     }
 }
 
-impl<'a, Message: 'a, Renderer> From<Timeline<'a, Message, Renderer>>
+impl<'a, Message: 'a, Renderer> From<Timeline<Message, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer + text::Renderer + 'a,
+    Message: 'a,
 {
-    fn from(widget: Timeline<'a, Message, Renderer>) -> Self {
+    fn from(widget: Timeline<Message, Renderer>) -> Self {
         Self::new(widget)
     }
 }

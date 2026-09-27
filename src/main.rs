@@ -1,14 +1,19 @@
 mod clip_components;
 mod widgets;
 
+use std::rc::Rc;
+
 use iced::{
-    Element, Length, Size, Theme, advanced::Widget, widget::{
-        column, grid, pane_grid::{self}, scrollable, text
-    } 
+    Element, Length, Point, Theme,
+    widget::{
+        column, grid,
+        pane_grid::{self},
+        scrollable, text,
+    },
 };
 
-use crate::{clip_components::video_clip::VideoComponent, widgets::clip_timeline::ClipTimeline};
 use crate::widgets::clip_entry::ClipEntry;
+use crate::widgets::clip_timeline::ClipTimeline;
 use crate::widgets::timeline::Timeline;
 use std::fs;
 
@@ -21,98 +26,96 @@ enum PaneType {
     ColorGrading,
 }
 
-struct App<'a> {
-    value: i32,
+struct App {
     panes: pane_grid::State<PaneType>,
-    clips: Vec<ClipTimeline<'a>>,
-    dragging_clip: Option<ClipTimeline<'a>>,
+    clips_timelines: Vec<ClipTimeline>,
+    clips_entries: Vec<ClipEntry<Message>>,
+    dragging_clip_index: Option<usize>,
 }
 
-impl Default for App<'_> {
+impl Default for App {
     fn default() -> Self {
-        let (mut panes, pane) = pane_grid::State::new(PaneType::Browser);
-        let (clip, _) = panes
-            .split(pane_grid::Axis::Vertical, pane, PaneType::Clips)
+        let (mut panes, browser) = pane_grid::State::new(PaneType::Browser);
+        let (clip, split) = panes
+            .split(pane_grid::Axis::Vertical, browser, PaneType::Clips)
             .unwrap();
+        panes.resize(split, 0.15);
         let (timeline, _) = panes
             .split(pane_grid::Axis::Horizontal, clip, PaneType::Timeline)
             .unwrap();
         panes.split(pane_grid::Axis::Vertical, clip, PaneType::Viewer);
         panes.split(pane_grid::Axis::Vertical, timeline, PaneType::ColorGrading);
         Self {
-            value: 0,
             panes,
-            clips: vec![
-                ClipTimeline::new("Opening shot", 210.0, &VideoComponent {}),
-                ClipTimeline::new("Interview", 168.0, &VideoComponent {}),
-                ClipTimeline::new("Music bed", 300.0, &VideoComponent {}),
-            ],
-            dragging_clip: None,
+            clips_timelines: vec![],
+            clips_entries: (1..5)
+                .map(|x| {
+                    ClipEntry::new(x.to_string(), 100.0)
+                        .on_press(Message::ClipPressed(x))
+                        .on_drag(move |p| Message::ClipMoved(x, p))
+                        .on_drop(Message::ClipDropped(x))
+                })
+                .collect(),
+            dragging_clip_index: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Increment,
-    Decrement,
     Resized(pane_grid::ResizeEvent),
     Dragged(pane_grid::DragEvent),
-    ClipDragStarted(String, f32),
-    ClipDroppedToTimeline,
     MouseReleased,
+    ClipPressed(usize),
+    ClipMoved(usize, Point),
+    /// Carries the index of the clip entry being dropped.
+    ClipDropped(usize),
+    /// Fired by the Timeline when a dragged clip is released over it.
+    /// Carries the drop position and the clip-entry index.
+    ClipDroppedToTimeline(Point, usize),
 }
 
-impl App<'_> {
+impl App {
     pub fn view(&self) -> Element<'_, Message> {
         pane_grid::PaneGrid::new(&self.panes, |_pane, state, _is_maximized| {
             let (title, content): (&str, Element<'_, Message>) = match state {
                 PaneType::Clips => (
                     "Clips",
-                    grid((1..2).map(|_x| {
-                        ClipEntry::new(_x.to_string(), 100.0)
-                            .on_press(Message::ClipDragStarted(_x.to_string(), 100.0))
-                            .into()
-                    }))
-                    .into(),
+                    grid(self.clips_entries.iter().cloned().map(Element::from))
+                        .height(2000.0)
+                        .into(),
                 ),
-                PaneType::Timeline => (
-                    "Timeline",
+                PaneType::Timeline => ("Timeline", {
+                    let dragging_index = self.dragging_clip_index;
                     scrollable(
-                        Timeline::with_clips(self.clips.clone())
-                            .dragging_clip(self.dragging_clip.is_some())
-                            .on_drop(Message::ClipDroppedToTimeline),
+                        Timeline::with_clips(self.clips_timelines.clone())
+                            .dragging_clip(dragging_index.is_some())
+                            .on_drop(move |pos| {
+                                if let Some(idx) = dragging_index {
+                                    Message::ClipDroppedToTimeline(pos, idx)
+                                } else {
+                                    // Shouldn't happen, but satisfy the type
+                                    Message::ClipDroppedToTimeline(pos, usize::MAX)
+                                }
+                            }),
                     )
-                    .direction(
-                        scrollable::Direction::Both {
-                            vertical: scrollable::Scrollbar::new(),
-                            horizontal: scrollable::Scrollbar::new()
-                        }
-                    )
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::new(),
+                        horizontal: scrollable::Scrollbar::new(),
+                    })
                     .into()
-                ),
+                }),
                 PaneType::Viewer => ("Viewer", text("pipi").into()),
-                PaneType::Browser => { 
+                PaneType::Browser => {
                     let fih: Vec<Element<_>> = fs::read_dir(".")
                         .unwrap()
-                        .map(
-                            |x| {
-                                let name = x.unwrap().file_name();
-                                text(
-                                    name
-                                    .to_string_lossy()
-                                    .into_owned()
-                                ).into()
-                            }
-                        ).collect::<Vec<Element<_>>>();
-                    (
-                    "Browser",
-                    column(
-                        fih
-                    )
-                    .width(Length::Fill)
-                    .into(),
-                ) },
+                        .map(|x| {
+                            let name = x.unwrap().file_name();
+                            text(name.to_string_lossy().into_owned()).into()
+                        })
+                        .collect::<Vec<Element<_>>>();
+                    ("Browser", column(fih).width(Length::Shrink).into())
+                }
                 PaneType::ColorGrading => ("ColorGrading", text("ColorGrading").into()),
             };
             pane_grid::Content::new(content).title_bar(pane_grid::TitleBar::new(text(title)))
@@ -124,29 +127,43 @@ impl App<'_> {
 
     pub fn update(&mut self, message: Message) {
         match message {
-            Message::Increment => {
-                self.value += 1;
-            }
-            Message::Decrement => {
-                self.value -= 1;
-            }
             Message::Resized(pane_grid::ResizeEvent { split, ratio, .. }) => {
                 self.panes.resize(split, ratio);
             }
             Message::Dragged(pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.panes.drop(pane, target);
             }
-            Message::Dragged(_) => {}
-            Message::ClipDragStarted(name, length) => {
-                self.dragging_clip = Some(ClipTimeline::new(name, length, &VideoComponent {}));
+            Message::Dragged(x) => {
+                dbg!(x);
             }
-            Message::ClipDroppedToTimeline => {
-                if let Some(clip) = self.dragging_clip.take() {
-                    self.clips.push(clip);
+            Message::ClipPressed(x) => {
+                dbg!(x);
+            }
+            Message::ClipDropped(index) => {
+                // Mark which clip entry is being dragged so the Timeline knows
+                self.dragging_clip_index = Some(index);
+            }
+            Message::ClipMoved(i, p) => {
+                self.dragging_clip_index = Some(i);
+                if let Some(clip) = self.clips_entries.get_mut(i) {
+                    clip.position = p;
                 }
             }
+            Message::ClipDroppedToTimeline(_pos, index) => {
+                if index != usize::MAX {
+                    if let Some(entry) = self.clips_entries.get(index) {
+                        let new_clip = ClipTimeline::new(
+                            entry.name.clone(),
+                            entry.length,
+                            Rc::clone(&entry.component),
+                        );
+                        self.clips_timelines.push(new_clip);
+                    }
+                }
+                self.dragging_clip_index = None;
+            }
             Message::MouseReleased => {
-                self.dragging_clip = None;
+                self.dragging_clip_index = None;
             }
         }
     }
