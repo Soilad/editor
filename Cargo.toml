@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ffmpeg-sys-next = "7"
-avio = { version = "0.18.0", features = [ "preview", "serde", "gpu" ] }
-iced = { version = "0.14.0", features = [ "advanced" ] }
+# ffmpeg-sys-next = "7"
+avio    = { version = "0.18.0", features = [ "preview", "serde", "gpu" ] }
+iced_aw = { version = "0.14.0", features = ["full"] }
+iced    = { version = "0.14.0", features = [ "advanced", "tokio", "image"] }
+tokio = "1.53.1"

@@ -1,6 +1,9 @@
 [env]
-PKG_CONFIG_PATH = { value = ".ffmpeg7/lib/pkgconfig", relative = true, force = true }
+# PKG_CONFIG_PATH = { value = ".ffmpeg7/lib/pkgconfig", relative = true, force = true }
 FFMPEG_DIR = { value = ".ffmpeg7", relative = true, force = true }
+LD_LIBRARY_PATH = "/home/soilad/.local/ffmpeg7/lib"
+PKG_CONFIG_PATH = "/home/soilad/.local/ffmpeg7/lib/pkgconfig"
 
 [build]
-rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/../../.ffmpeg7/lib"]
+# rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/../../.ffmpeg7/lib"]
+rustflags = ["-C", "link-args=-Wl,-rpath,/home/soilad/.local/ffmpeg7/lib"]

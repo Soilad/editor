@@ -22,10 +22,10 @@ const BASE_CONTENT_WIDTH: f32 = 1_800.0;
 const SCROLLBAR_HEIGHT: f32 = 14.0;
 
 #[derive(Debug, Clone)]
-struct Placement {
-    track: usize,
-    start: f32,
-    length: f32,
+pub struct Placement {
+    pub track: usize,
+    pub start: f32,
+    pub length: f32,
 }
 
 #[derive(Debug, Default)]
@@ -98,7 +98,6 @@ impl<Message, Renderer> Timeline<Message, Renderer> {
     fn lane_width(&self) -> f32 {
         TIMELINE_WIDTH - LABEL_WIDTH
     }
-
 
     fn content_width(&self, state: &State) -> f32 {
         state
@@ -173,7 +172,7 @@ impl<Message, Renderer> Timeline<Message, Renderer> {
         )
     }
 
-    fn snap(value: f32) -> f32 {
+    pub fn snap(value: f32) -> f32 {
         (value / SNAP).round() * SNAP
     }
 }
@@ -213,27 +212,27 @@ where
             let pending = state.pending_placement.take();
             state
                 .placements
-                .extend(
-                    (state.placements.len()..self.clips.len()).map(|index| {
-                        let (start, track) = if index == self.clips.len() - 1 {
-                            // Last (newly added) clip — use the drop position if available.
-                            pending.unwrap_or_else(|| (
-                                24.0 + index as f32 * 84.0,
-                                index.min(self.track_count() - 1),
-                            ))
-                        } else {
+                .extend((state.placements.len()..self.clips.len()).map(|index| {
+                    let (start, track) = if index == self.clips.len() - 1 {
+                        // Last (newly added) clip — use the drop position if available.
+                        pending.unwrap_or_else(|| {
                             (
                                 24.0 + index as f32 * 84.0,
                                 index.min(self.track_count() - 1),
                             )
-                        };
-                        Placement {
-                            track,
-                            start,
-                            length: self.clips[index].length.max(clip_timeline::MIN_LENGTH),
-                        }
-                    }),
-                );
+                        })
+                    } else {
+                        (
+                            24.0 + index as f32 * 84.0,
+                            index.min(self.track_count() - 1),
+                        )
+                    };
+                    Placement {
+                        track,
+                        start,
+                        length: self.clips[index].length.max(clip_timeline::MIN_LENGTH),
+                    }
+                }));
         } else {
             state.placements.truncate(self.clips.len());
         }
@@ -246,12 +245,10 @@ where
         _renderer: &Renderer,
         _limits: &layout::Limits,
     ) -> layout::Node {
-        layout::Node::new(
-            Size::new(
-                TIMELINE_WIDTH,
-                self.track_count() as f32 * TRACK_HEIGHT + SCROLLBAR_HEIGHT,
-            )
-        )
+        layout::Node::new(Size::new(
+            TIMELINE_WIDTH,
+            self.track_count() as f32 * TRACK_HEIGHT + SCROLLBAR_HEIGHT,
+        ))
     }
 
     fn draw(
@@ -325,14 +322,8 @@ where
                 continue;
             }
 
-            clip_timeline.draw_at(
-                renderer,
-                theme,
-                clip_bounds,
-                viewport,
-            );
+            clip_timeline.draw_at(renderer, theme, clip_bounds, viewport);
         }
-
 
         let playhead_x = self.timeline_to_screen_x(layout, state, state.playhead);
         if playhead_x >= lane_bounds.x && playhead_x <= lane_bounds.x + lane_bounds.width {
@@ -431,7 +422,6 @@ where
                 *viewport,
             );
         }
-
     }
 
     fn update(
@@ -533,32 +523,21 @@ where
                         });
                     }
                     DragMode::ResizeStart { clip, original_end } => {
-                        let max_start = (original_end - clip_timeline::MIN_LENGTH).max(0.0);
                         let raw_start = self.screen_to_timeline_x(layout, state, position.x);
+                        let max_start = (original_end - clip_timeline::MIN_LENGTH).max(0.0);
                         let snapped_start =
                             Self::snap(raw_start.clamp(0.0, max_start)).min(max_start);
                         let placement = &mut state.placements[clip];
-                        ClipTimeline::resize_from_start(
-                            &mut placement.start,
-                            &mut placement.length,
-                            snapped_start,
-                        );
+                        self.clips[clip].resize_start(placement, snapped_start);
                         state.drag = Some(Drag {
                             mode: DragMode::ResizeStart { clip, original_end },
                         });
                     }
                     DragMode::ResizeEnd { clip } => {
-                        let start = state.placements[clip].start;
                         let raw_end = self.screen_to_timeline_x(layout, state, position.x);
                         let max_end = self.content_width(state);
-                        let snapped_end =
-                            Self::snap(raw_end.clamp(start + clip_timeline::MIN_LENGTH, max_end))
-                                .min(max_end);
-                        ClipTimeline::resize_from_end(
-                            start,
-                            &mut state.placements[clip].length,
-                            snapped_end,
-                        );
+                        let placement = &mut state.placements[clip];
+                        self.clips[clip].resize_end(placement, raw_end, max_end);
                         state.drag = Some(Drag {
                             mode: DragMode::ResizeEnd { clip },
                         });
@@ -590,8 +569,8 @@ where
                             // Compute where on the timeline the clip landed.
                             let raw_start = self.screen_to_timeline_x(layout, state, position.x);
                             let start = Self::snap(raw_start).max(0.0);
-                            let track = (((position.y - layout.bounds().y) / TRACK_HEIGHT)
-                                .floor() as isize)
+                            let track = (((position.y - layout.bounds().y) / TRACK_HEIGHT).floor()
+                                as isize)
                                 .clamp(0, self.track_count() as isize - 1)
                                 as usize;
                             state.pending_placement = Some((start, track));
@@ -608,7 +587,7 @@ where
                     return;
                 };
                 if !self.lane_bounds(layout).contains(position)
-                    // && !self.scrollbar_bounds(layout).contains(position)
+                // && !self.scrollbar_bounds(layout).contains(position)
                 {
                     return;
                 }
@@ -649,9 +628,7 @@ where
                 DragMode::ResizeStart { .. } | DragMode::ResizeEnd { .. } => {
                     mouse::Interaction::ResizingHorizontally
                 }
-                DragMode::Playhead | DragMode::Move { .. } => {
-                    mouse::Interaction::Grabbing
-                }
+                DragMode::Playhead | DragMode::Move { .. } => mouse::Interaction::Grabbing,
             };
         }
 
@@ -669,10 +646,7 @@ where
 
         for index in (0..self.clips.len()).rev() {
             let clip_bounds = self.clip_bounds(layout, state, &state.placements[index]);
-            let interaction = ClipTimeline::mouse_interaction_at(
-                clip_bounds,
-                cursor,
-            );
+            let interaction = ClipTimeline::mouse_interaction_at(clip_bounds, cursor);
             if interaction != mouse::Interaction::None {
                 return interaction;
             }

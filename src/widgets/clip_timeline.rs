@@ -1,17 +1,15 @@
 use std::rc::Rc;
 
 use iced::{
-    Border, Color, Element, Event, Length, Point, Rectangle, Shadow, Size, Theme,
-    advanced::{
+    Border, Color, Element, Event, Length, Point, Rectangle, Renderer, Shadow, Size, Theme, advanced::{
         Clipboard, Layout, Shell, Widget, layout, mouse,
         renderer::Quad,
         text::{self, Text},
         widget::Tree,
-    },
-    alignment,
+    }, alignment
 };
 
-use crate::clip_components::{ ClipComponent, video_clip::VideoComponent };
+use crate::{Message, clip_components::{ClipComponent, video_clip::VideoComponent}};
 
 pub const MIN_LENGTH: f32 = 48.0;
 pub const HEIGHT: f32 = 52.0;
@@ -43,11 +41,7 @@ pub struct ClipTimeline {
 }
 
 impl ClipTimeline {
-    pub fn new(
-        name: impl Into<String>,
-        length: f32,
-        component: Rc<dyn ClipComponent>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, length: f32, component: Rc<dyn ClipComponent>) -> Self {
         Self {
             name: name.into(),
             length: length.max(MIN_LENGTH),
@@ -77,6 +71,25 @@ impl ClipTimeline {
 
     pub fn resize_from_end(start: f32, length: &mut f32, new_end: f32) {
         *length = (new_end - start).max(MIN_LENGTH);
+    }
+
+    pub fn resize_start(&self, placement: &mut super::timeline::Placement, new_start: f32) {
+        let end = placement.start + placement.length;
+        placement.start = new_start.min(end - MIN_LENGTH).max(0.0);
+        placement.length = (end - placement.start).max(MIN_LENGTH);
+    }
+
+    pub fn resize_end(
+        &self,
+        placement: &mut super::timeline::Placement,
+        new_end: f32,
+        max_end: f32,
+    ) {
+        let snapped_end = super::timeline::Timeline::<Message, Renderer>::snap(
+            new_end.clamp(placement.start + MIN_LENGTH, max_end),
+        )
+        .min(max_end);
+        placement.length = (snapped_end - placement.start).max(MIN_LENGTH);
     }
 
     pub fn hit_test(bounds: Rectangle, position: Point) -> Option<Hit> {
@@ -170,11 +183,7 @@ impl ClipTimeline {
 
 impl Default for ClipTimeline {
     fn default() -> Self {
-        Self::new(
-            "Untitled clip",
-            180.0,
-            Rc::new(VideoComponent::default()),
-        )
+        Self::new("Untitled clip", 180.0, Rc::new(VideoComponent::default()))
     }
 }
 
@@ -210,12 +219,7 @@ where
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.draw_at(
-            renderer,
-            theme,
-            layout.bounds(),
-            viewport,
-        );
+        self.draw_at(renderer, theme, layout.bounds(), viewport);
     }
 
     fn update(
@@ -251,4 +255,3 @@ where
         Self::new(widget)
     }
 }
-

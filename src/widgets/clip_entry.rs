@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 
 use iced::{
     Border, Color, Element, Event, Length, Point, Rectangle, Shadow, Size, Theme,
@@ -7,11 +7,11 @@ use iced::{
         renderer::Quad,
         text::{self, Text},
         widget::{Tree, tree},
-    }, alignment,
+    },
+    alignment,
 };
 
 use crate::clip_components::{ClipComponent, video_clip::VideoComponent};
-
 
 pub const MIN_LENGTH: f32 = 48.0;
 pub const HEIGHT: f32 = 52.0;
@@ -38,19 +38,31 @@ pub struct ClipEntry<Message> {
     pub position: Point,
     /// ClipEntry duration, measured in timeline pixels for this small example widget.
     pub length: f32,
-    pub component: Rc<dyn ClipComponent>,
+    pub component: Option<Rc<dyn ClipComponent>>,
+    pub avio_component: Option<avio::Clip>,
     pub on_press: Option<Message>,
     pub on_drag: Option<Rc<dyn Fn(Point) -> Message>>,
     pub on_drop: Option<Message>,
 }
 
 impl<Message> ClipEntry<Message> {
-    pub fn new(name: impl Into<String>, length: f32) -> Self {
+    pub fn new(name: impl Into<String>, length: f32, path: PathBuf) -> Self {
         Self {
             name: name.into(),
             position: Point { x: 100.0, y: 0.0 },
             length: length.max(MIN_LENGTH),
-            component: Rc::new(VideoComponent::default()),
+            component: Some(
+                Rc::new(
+                    VideoComponent{
+                        path: path.clone()
+                    }
+                )
+            ),
+            avio_component: Some(
+                avio::Clip::new(
+                    path,
+                ),
+            ),
             on_press: None,
             on_drag: None,
             on_drop: None,
@@ -97,16 +109,14 @@ impl<Message> ClipEntry<Message> {
             y: self.position.y,
             ..bounds
         }
-
-    }
-
-}
-
-impl<Message> Default for ClipEntry<Message> {
-    fn default() -> Self {
-        Self::new("Untitled clip", 180.0)
     }
 }
+
+// impl<Message> Default for ClipEntry<Message> {
+//     fn default() -> Self {
+//         Self::new("Untitled clip", 180.0)
+//     }
+// }
 
 impl<Message, Renderer> Widget<Message, Theme, Renderer> for ClipEntry<Message>
 where
@@ -151,19 +161,18 @@ where
     ) {
         let state = tree.state.downcast_ref::<DragState>();
         let palette = theme.palette();
-        let bounds = 
-            if let Some(position) = _cursor.position()
-                && state.dragging 
-            {
-                let bounds = layout.bounds();
-                Rectangle {
-                    x: position.x - state.grab_offset.x,
-                    y: position.y - state.grab_offset.y,
-                    ..bounds
-                }
-            } else {
-                layout.bounds()
-            };
+        let bounds = if let Some(position) = _cursor.position()
+            && state.dragging
+        {
+            let bounds = layout.bounds();
+            Rectangle {
+                x: position.x - state.grab_offset.x,
+                y: position.y - state.grab_offset.y,
+                ..bounds
+            }
+        } else {
+            layout.bounds()
+        };
 
         renderer.fill_quad(
             Quad {
