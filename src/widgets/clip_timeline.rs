@@ -1,18 +1,33 @@
-use std::rc::Rc;
+use std::{collections::HashSet, time::Duration};
 
+use avio::{ClipId, TrackKind};
 use iced::{
-    Border, Color, Element, Event, Length, Point, Rectangle, Renderer, Shadow, Size, Theme, advanced::{
-        Clipboard, Layout, Shell, Widget, layout, mouse,
+    Border, Color, Element, Length, Point, Rectangle, Shadow, Size, Theme,
+    advanced::{
+        mouse,
         renderer::Quad,
         text::{self, Text},
-        widget::Tree,
-    }, alignment
+    },
+    alignment,
+    keyboard::key::Named::Delete,
+    widget::{button, column},
+    window::position,
 };
 
-use crate::{Message, clip_components::{ClipComponent, video_clip::VideoComponent}};
+use crate::helper_funcs::{self, find_clip};
+use crate::thumbnails::SourcePreview;
+use crate::widgets::clip_preview;
+use crate::widgets::theme::{CORNER_RADIUS, button_style};
+use crate::{Message, component_for};
 
-pub const MIN_LENGTH: f32 = 48.0;
-pub const HEIGHT: f32 = 52.0;
+/// Metadata key under which the full length of a clip's source media is stored
+/// (in seconds), so trims can be clamped without re-probing the file.
+pub const SOURCE_DURATION_KEY: &str = "source_duration";
+
+/// Footprint used for clips whose out-point is unset (they run to end-of-file).
+const OPEN_ENDED_SECS: f64 = 5.0;
+
+pub const MIN_WIDTH: f32 = 16.0;
 
 const HANDLE_WIDTH: f32 = 8.0;
 const LABEL_PADDING: f32 = 13.0;
@@ -24,29 +39,67 @@ pub enum Hit {
     Body,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Appearance {
-    pub active: bool,
+/// Read-only view over an [`avio::Clip`] for the [`Timeline`](super::timeline::Timeline)
+/// widget. Placement comes from the clip itself; hit-testing and rendering live here.
+#[derive(Clone, Copy)]
+pub struct ClipTimeline<'a> {
+    pub clip: &'a avio::Clip,
 }
 
-/// An editor-style clip widget. Timeline placement is still owned by
-/// [`Timeline`](super::timeline::Timeline), while clip sizing, hit-testing, and
-/// rendering live here.
-#[derive(Clone)]
-pub struct ClipTimeline {
-    pub name: String,
-    /// Clip duration, measured in timeline pixels for this small example widget.
-    pub length: f32,
-    pub component: Rc<dyn ClipComponent>,
-}
+impl<'a> ClipTimeline<'a> {
+    pub fn new(clip: &'a avio::Clip) -> Self {
+        Self { clip }
+    }
 
-impl ClipTimeline {
-    pub fn new(name: impl Into<String>, length: f32, component: Rc<dyn ClipComponent>) -> Self {
-        Self {
-            name: name.into(),
-            length: length.max(MIN_LENGTH),
-            component,
+    pub fn name(&self) -> String {
+        match &self.clip.source {
+            avio::ClipSource::File(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            avio::ClipSource::Text(_) => "Text".to_owned(),
+            avio::ClipSource::Solid(_) => "Solid".to_owned(),
         }
+    }
+
+    /// Timeline start, in seconds.
+    pub fn start(&self) -> f64 {
+        self.clip.offset.as_secs_f64()
+    }
+
+    /// Source in-point, in seconds.
+    pub fn in_point(&self) -> f64 {
+        self.clip.in_point.unwrap_or(Duration::ZERO).as_secs_f64()
+    }
+
+    pub fn speed(&self) -> f64 {
+        helper_funcs::clip_speed(self.clip)
+    }
+
+    /// Timeline footprint (source duration divided by speed), in seconds.
+    pub fn footprint(&self) -> f64 {
+        helper_funcs::footprint(self.clip)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(OPEN_ENDED_SECS)
+    }
+
+    /// Length of the underlying source media, in seconds, if known.
+    pub fn source_duration(&self) -> Option<f64> {
+        self.clip
+            .metadata
+            .get(SOURCE_DURATION_KEY)
+            .and_then(|value| value.parse().ok())
+    }
+
+    pub fn body_bounds(bounds: Rectangle) -> Rectangle {
+        let position = Point {
+            x: bounds.position().x + (HANDLE_WIDTH.min(bounds.width) / 2.0),
+            y: bounds.position().y,
+        };
+        Rectangle::new(
+            position,
+            Size::new(bounds.width - HANDLE_WIDTH, bounds.height),
+        )
     }
 
     pub fn left_handle_bounds(bounds: Rectangle) -> Rectangle {
@@ -61,35 +114,6 @@ impl ClipTimeline {
             Point::new(bounds.x + (bounds.width - HANDLE_WIDTH).max(0.0), bounds.y),
             Size::new(HANDLE_WIDTH.min(bounds.width), bounds.height),
         )
-    }
-
-    pub fn resize_from_start(start: &mut f32, length: &mut f32, new_start: f32) {
-        let end = *start + *length;
-        *start = new_start.min(end - MIN_LENGTH).max(0.0);
-        *length = (end - *start).max(MIN_LENGTH);
-    }
-
-    pub fn resize_from_end(start: f32, length: &mut f32, new_end: f32) {
-        *length = (new_end - start).max(MIN_LENGTH);
-    }
-
-    pub fn resize_start(&self, placement: &mut super::timeline::Placement, new_start: f32) {
-        let end = placement.start + placement.length;
-        placement.start = new_start.min(end - MIN_LENGTH).max(0.0);
-        placement.length = (end - placement.start).max(MIN_LENGTH);
-    }
-
-    pub fn resize_end(
-        &self,
-        placement: &mut super::timeline::Placement,
-        new_end: f32,
-        max_end: f32,
-    ) {
-        let snapped_end = super::timeline::Timeline::<Message, Renderer>::snap(
-            new_end.clamp(placement.start + MIN_LENGTH, max_end),
-        )
-        .min(max_end);
-        placement.length = (snapped_end - placement.start).max(MIN_LENGTH);
     }
 
     pub fn hit_test(bounds: Rectangle, position: Point) -> Option<Hit> {
@@ -116,55 +140,77 @@ impl ClipTimeline {
         }
     }
 
+    /// Draw the clip in `bounds`. `preview` holds what was decoded from the
+    /// clip's source file: a video track shows its first frame, an audio track
+    /// its waveform over the trimmed range.
     pub fn draw_at<Renderer>(
         &self,
         renderer: &mut Renderer,
         theme: &Theme,
         bounds: Rectangle,
         viewport: &Rectangle,
+        active: bool,
+        kind: TrackKind,
+        preview: Option<&SourcePreview>,
     ) where
-        Renderer: iced::advanced::Renderer + text::Renderer,
+        Renderer: iced::advanced::Renderer
+            + text::Renderer
+            + iced::advanced::image::Renderer<Handle = iced::advanced::image::Handle>,
     {
         let palette = theme.palette();
-        let fill = palette.background;
+        let border = if active {
+            palette.primary
+        } else {
+            palette.text
+        };
 
         renderer.fill_quad(
             Quad {
-                bounds,
+                bounds: Self::body_bounds(bounds),
                 border: Border {
-                    color: Color {
-                        a: 0.9,
-                        ..palette.text
-                    },
+                    color: Color { a: 0.9, ..border },
                     width: 1.0,
-                    radius: 4.0.into(),
+                    radius: 0.0.into(),
                 },
                 shadow: Shadow::default(),
                 snap: false,
             },
-            fill,
+            palette.background,
         );
+        if let Some(preview) = preview {
+            self.draw_preview(renderer, preview, bounds, viewport, kind, border);
+        }
         renderer.fill_quad(
             Quad {
                 bounds: Self::left_handle_bounds(bounds),
-                border: Border::default(),
+                border: Border {
+                    radius: CORNER_RADIUS,
+                    ..Border::default()
+                },
                 shadow: Shadow::default(),
                 snap: false,
             },
-            palette.text,
+            border,
         );
         renderer.fill_quad(
             Quad {
                 bounds: Self::right_handle_bounds(bounds),
-                border: Border::default(),
+                border: Border {
+                    radius: CORNER_RADIUS,
+                    ..Border::default()
+                },
                 shadow: Shadow::default(),
                 snap: false,
             },
-            palette.text,
+            border,
         );
+        // Keep the name inside the clip's body and the visible area.
+        let Some(label_clip) = Self::body_bounds(bounds).intersection(viewport) else {
+            return;
+        };
         renderer.fill_text(
             Text {
-                content: self.name.clone(),
+                content: self.name(),
                 size: 14.0.into(),
                 line_height: text::LineHeight::default(),
                 font: renderer.default_font(),
@@ -176,82 +222,111 @@ impl ClipTimeline {
             },
             Point::new(bounds.x + LABEL_PADDING, bounds.center_y()),
             Color::WHITE,
-            *viewport,
+            label_clip,
         );
     }
 }
 
-impl Default for ClipTimeline {
-    fn default() -> Self {
-        Self::new("Untitled clip", 180.0, Rc::new(VideoComponent::default()))
-    }
-}
-
-impl<Message, Renderer> Widget<Message, Theme, Renderer> for ClipTimeline
-where
-    Renderer: iced::advanced::Renderer + text::Renderer,
-{
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(self.length), Length::Fixed(HEIGHT))
-    }
-
-    fn layout(
-        &mut self,
-        _tree: &mut Tree,
-        _renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let limits = limits.width(self.length).height(HEIGHT);
-        layout::Node::new(limits.resolve(
-            Length::Fixed(self.length),
-            Length::Fixed(HEIGHT),
-            Size::ZERO,
-        ))
-    }
-
-    fn draw(
+impl ClipTimeline<'_> {
+    fn draw_preview<Renderer>(
         &self,
-        _tree: &Tree,
         renderer: &mut Renderer,
-        theme: &Theme,
-        _style: &iced::advanced::renderer::Style,
-        layout: Layout<'_>,
-        _cursor: mouse::Cursor,
+        preview: &SourcePreview,
+        bounds: Rectangle,
         viewport: &Rectangle,
-    ) {
-        self.draw_at(renderer, theme, layout.bounds(), viewport);
-    }
-
-    fn update(
-        &mut self,
-        _tree: &mut Tree,
-        _event: &Event,
-        _layout: Layout<'_>,
-        _cursor: mouse::Cursor,
-        _renderer: &Renderer,
-        _clipboard: &mut dyn Clipboard,
-        _shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
-    ) {
-    }
-
-    fn mouse_interaction(
-        &self,
-        _tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-        _renderer: &Renderer,
-    ) -> mouse::Interaction {
-        Self::mouse_interaction_at(layout.bounds(), cursor)
+        kind: TrackKind,
+        color: Color,
+    ) where
+        Renderer: iced::advanced::Renderer
+            + iced::advanced::image::Renderer<Handle = iced::advanced::image::Handle>,
+    {
+        let body = Self::body_bounds(bounds).shrink(1.0);
+        let Some(visible) = body.intersection(viewport) else {
+            return;
+        };
+        match kind {
+            TrackKind::Video => {
+                if let Some(frame) = &preview.frame {
+                    clip_preview::draw_frame(renderer, frame, body, visible);
+                }
+            }
+            TrackKind::Audio => {
+                if let Some(waveform) = &preview.waveform {
+                    let from = self.in_point();
+                    let to = from + self.footprint() * self.speed();
+                    clip_preview::draw_waveform(
+                        renderer,
+                        waveform,
+                        body,
+                        visible,
+                        from,
+                        to,
+                        Color { a: 0.5, ..color },
+                    );
+                }
+            }
+        }
     }
 }
 
-impl<'a, Message: 'a, Renderer> From<ClipTimeline> for Element<'a, Message, Theme, Renderer>
-where
-    Renderer: iced::advanced::Renderer + text::Renderer + 'a,
-{
-    fn from(widget: ClipTimeline) -> Self {
-        Self::new(widget)
+/// Items of the timeline's right-click menu, for the right-clicked `clip` (if
+/// any). Split cuts the clip at `playhead`, and is disabled when the playhead
+/// isn't over the clip. Split and Delete act on the whole `selection` when the
+/// right-clicked clip is part of it; Split then cuts every selected clip the
+/// playhead is over.
+pub fn context_menu<'a>(
+    timeline: &'a avio::Timeline,
+    clip: Option<ClipId>,
+    playhead: Duration,
+    selection: &HashSet<ClipId>,
+) -> Element<'a, Message> {
+    let target = clip.and_then(|id| find_clip(timeline, id));
+    let in_selection = target.is_some_and(|(_, clip)| selection.contains(&clip.id));
+    // A split's left half keeps the clip's id, so later cuts stay valid.
+    let splits: Vec<avio::Command> = if in_selection {
+        selection.iter().copied().collect::<Vec<ClipId>>()
+    } else {
+        target
+            .map(|(_, clip)| clip.id)
+            .into_iter()
+            .collect::<Vec<ClipId>>()
     }
+    .into_iter()
+    .filter_map(|id| find_clip(timeline, id))
+    .filter_map(|(_, clip)| component_for(timeline, clip).split(playhead))
+    .collect();
+    let split = (!splits.is_empty()).then(|| Message::TimelineEdited(splits));
+    let copy =
+        target.map(|(track, clip)| Message::CopyClip(track, component_for(timeline, clip).copy()));
+    let properties = target
+        .filter(|(_, clip)| !component_for(timeline, clip).properties().is_empty())
+        .map(|(_, clip)| Message::OpenProperties(clip.id));
+    let delete = target.map(|(track, clip)| {
+        if selection.len() > 1 && selection.contains(&clip.id) {
+            Message::DeleteSelected
+        } else {
+            Message::RemoveClip(track, clip.id)
+        }
+    });
+    column![
+        button("Split")
+            .style(button_style)
+            .on_press_maybe(split)
+            .width(Length::Fill),
+        button("Copy")
+            .style(button_style)
+            .on_press_maybe(copy)
+            .width(Length::Fill),
+        button("Delete")
+            .style(button_style)
+            .on_press_maybe(delete)
+            .width(Length::Fill),
+        button("Properties")
+            .style(button_style)
+            .on_press_maybe(properties)
+            .width(Length::Fill),
+    ]
+    .spacing(10)
+    .width(100)
+    .into()
 }
